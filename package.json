@@ -1,0 +1,44 @@
+{
+  "name": "gemini-image-generator-mcp",
+  "version": "0.2.0",
+  "description": "MCP server to generate images via Gemini with optional upload support",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "gemini-image-generator-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example"
+  ],
+  "keywords": [
+    "mcp",
+    "gemini",
+    "image-generation",
+    "upload",
+    "cursor",
+    "claude",
+    "chatgpt"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
