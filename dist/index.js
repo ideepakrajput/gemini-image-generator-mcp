@@ -1,8 +1,7 @@
 #!/usr/bin/env node
-import dotenv from "dotenv";
+import "./env.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./server.js";
-dotenv.config();
 async function main() {
     const server = createServer();
     const transport = new StdioServerTransport();
