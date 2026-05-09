@@ -11,6 +11,22 @@ const DEFAULT_UPLOAD_X_API_KEY = "";
 
 type ImageProvider = "gemini" | "openai";
 
+type ReferenceImage = {
+  data: Buffer;
+  mimeType: string;
+  name: string;
+};
+
+type ReferenceImageInput = {
+  type?: string;
+  data?: string;
+  base64?: string;
+  data_uri?: string;
+  mimeType?: string;
+  mime_type?: string;
+  name?: string;
+};
+
 function text(content: unknown) {
   return {
     content: [
@@ -55,6 +71,161 @@ function normalizeProviderEnv(raw?: string): ImageProvider | "auto" {
   if (v === "gemini" || v === "google") return "gemini";
   if (v === "openai") return "openai";
   return "auto";
+}
+
+function inferImageMimeType(name: string, fallback = "image/png"): string {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".png")) return "image/png";
+  return fallback;
+}
+
+function bufferToBlobPart(data: Buffer): Uint8Array<ArrayBuffer> {
+  return Uint8Array.from(data);
+}
+
+function collectStringList(...values: unknown[]): string[] {
+  const result: string[] = [];
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      result.push(value.trim());
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === "string" && item.trim()) result.push(item.trim());
+      }
+    }
+  }
+  return result;
+}
+
+function normalizeBase64Data(value: string): string {
+  return value.replace(/\s/g, "");
+}
+
+function parseDataUri(value: string): { data: string; mimeType?: string } | undefined {
+  const match = value.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/is);
+  if (!match) return undefined;
+  return {
+    mimeType: match[1],
+    data: normalizeBase64Data(match[2])
+  };
+}
+
+function loadReferenceImageFromBase64(input: {
+  data: string;
+  mimeType?: string;
+  name?: string;
+}): ReferenceImage {
+  const parsedDataUri = parseDataUri(input.data);
+  const data = parsedDataUri?.data ?? normalizeBase64Data(input.data);
+  const name = input.name?.trim() || "reference-image.png";
+  const mimeType =
+    input.mimeType?.trim() ||
+    parsedDataUri?.mimeType ||
+    inferImageMimeType(name);
+
+  return {
+    data: Buffer.from(data, "base64"),
+    mimeType,
+    name
+  };
+}
+
+function loadReferenceImageFromObject(input: ReferenceImageInput): ReferenceImage | undefined {
+  const data = input.data_uri ?? input.data ?? input.base64;
+  if (!data) return undefined;
+  return loadReferenceImageFromBase64({
+    data,
+    mimeType: input.mimeType ?? input.mime_type,
+    name: input.name
+  });
+}
+
+function collectReferenceImageObjects(...values: unknown[]): ReferenceImageInput[] {
+  const result: ReferenceImageInput[] = [];
+  for (const value of values) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      result.push(value as ReferenceImageInput);
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item && typeof item === "object" && !Array.isArray(item)) {
+          result.push(item as ReferenceImageInput);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+async function loadReferenceImageFromPath(imagePath: string): Promise<ReferenceImage> {
+  const data = await fs.promises.readFile(imagePath);
+  return {
+    data,
+    mimeType: inferImageMimeType(imagePath),
+    name: path.basename(imagePath)
+  };
+}
+
+async function loadReferenceImageFromUrl(imageUrl: string): Promise<ReferenceImage> {
+  const res = await fetch(imageUrl);
+  if (!res.ok) {
+    throw new Error(`Unable to fetch reference image (${res.status}): ${imageUrl}`);
+  }
+  const contentType = res.headers.get("content-type")?.split(";")[0]?.trim();
+  const data = Buffer.from(await res.arrayBuffer());
+  const urlPath = new URL(imageUrl).pathname;
+  const name = path.basename(urlPath) || "reference-image.png";
+  return {
+    data,
+    mimeType:
+      contentType && contentType.startsWith("image/")
+        ? contentType
+        : inferImageMimeType(name),
+    name
+  };
+}
+
+async function loadReferenceImages(input: {
+  reference_image_path?: string;
+  reference_image_paths?: string[];
+  reference_image_url?: string;
+  reference_image_urls?: string[];
+  reference_image_base64?: string;
+  reference_image_data_uri?: string;
+  reference_image_mime_type?: string;
+  reference_image_name?: string;
+  reference_image?: ReferenceImageInput;
+  reference_images?: ReferenceImageInput[];
+}): Promise<ReferenceImage[]> {
+  const paths = collectStringList(input.reference_image_path, input.reference_image_paths);
+  const urls = collectStringList(input.reference_image_url, input.reference_image_urls);
+  const encodedImages = collectStringList(
+    input.reference_image_base64,
+    input.reference_image_data_uri
+  ).map((data) =>
+    loadReferenceImageFromBase64({
+      data,
+      mimeType: input.reference_image_mime_type,
+      name: input.reference_image_name
+    })
+  );
+  const objectImages = collectReferenceImageObjects(
+    input.reference_image,
+    input.reference_images
+  )
+    .map((image) => loadReferenceImageFromObject(image))
+    .filter((image): image is ReferenceImage => Boolean(image));
+  const images = await Promise.all([
+    ...paths.map((imagePath) => loadReferenceImageFromPath(imagePath)),
+    ...urls.map((imageUrl) => loadReferenceImageFromUrl(imageUrl))
+  ]);
+  return [...images, ...encodedImages, ...objectImages];
 }
 
 /**
@@ -113,7 +284,11 @@ function resolveModelForProvider(provider: ImageProvider, model: string): string
   return process.env.GEMINI_IMAGE_MODEL?.trim() || model;
 }
 
-async function generateImageWithGemini(prompt: string, model: string): Promise<Buffer> {
+async function generateImageWithGemini(
+  prompt: string,
+  model: string,
+  referenceImages: ReferenceImage[] = []
+): Promise<Buffer> {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not set.");
@@ -124,7 +299,15 @@ async function generateImageWithGemini(prompt: string, model: string): Promise<B
     contents: [
       {
         role: "user",
-        parts: [{ text: prompt }]
+        parts: [
+          ...referenceImages.map((image) => ({
+            inlineData: {
+              mimeType: image.mimeType,
+              data: image.data.toString("base64")
+            }
+          })),
+          { text: prompt }
+        ]
       }
     ],
     generationConfig: {
@@ -159,7 +342,8 @@ async function generateImageWithGemini(prompt: string, model: string): Promise<B
 async function generateImageWithOpenAI(
   prompt: string,
   model: string,
-  imageSize?: string
+  imageSize?: string,
+  referenceImages: ReferenceImage[] = []
 ): Promise<Buffer> {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
@@ -168,40 +352,67 @@ async function generateImageWithOpenAI(
 
   const base =
     process.env.OPENAI_BASE_URL?.trim()?.replace(/\/+$/, "") || "https://api.openai.com";
-  const url = `${base}/v1/images/generations`;
+  const url =
+    referenceImages.length > 0
+      ? `${base}/v1/images/edits`
+      : `${base}/v1/images/generations`;
 
   const size =
     imageSize?.trim() ||
     process.env.OPENAI_IMAGE_SIZE?.trim() ||
     DEFAULT_OPENAI_IMAGE_SIZE;
 
-  const requestBody: Record<string, unknown> = {
-    model,
-    prompt,
-    n: 1,
-    size
+  let requestBody: BodyInit;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`
   };
-  if (!/^gpt-image-/i.test(model) && model !== "chatgpt-image-latest") {
-    requestBody.response_format = "b64_json";
+
+  if (referenceImages.length > 0) {
+    const form = new FormData();
+    form.append("model", model);
+    form.append("prompt", prompt);
+    form.append("n", "1");
+    form.append("size", size);
+    const imageFieldName = referenceImages.length > 1 ? "image[]" : "image";
+    for (const image of referenceImages) {
+      form.append(
+        imageFieldName,
+        new Blob([bufferToBlobPart(image.data)], { type: image.mimeType }),
+        image.name
+      );
+    }
+    if (!/^gpt-image-/i.test(model) && model !== "chatgpt-image-latest") {
+      form.append("response_format", "b64_json");
+    }
+    requestBody = form;
+  } else {
+    headers["Content-Type"] = "application/json";
+    const jsonBody: Record<string, unknown> = {
+      model,
+      prompt,
+      n: 1,
+      size
+    };
+    if (!/^gpt-image-/i.test(model) && model !== "chatgpt-image-latest") {
+      jsonBody.response_format = "b64_json";
+    }
+    requestBody = JSON.stringify(jsonBody);
   }
 
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(requestBody)
+    headers,
+    body: requestBody
   });
 
-  const body = await res.json();
+  const responseBody = await res.json();
   if (!res.ok) {
-    throw new Error(`OpenAI API error (${res.status}): ${JSON.stringify(body)}`);
+    throw new Error(`OpenAI API error (${res.status}): ${JSON.stringify(responseBody)}`);
   }
 
-  const b64 = body?.data?.[0]?.b64_json;
+  const b64 = responseBody?.data?.[0]?.b64_json;
   if (!b64 || typeof b64 !== "string") {
-    throw new Error(`OpenAI did not return b64_json: ${JSON.stringify(body)}`);
+    throw new Error(`OpenAI did not return b64_json: ${JSON.stringify(responseBody)}`);
   }
 
   return Buffer.from(b64, "base64");
@@ -212,24 +423,112 @@ async function generateImageBytes(input: {
   provider: ImageProvider;
   model: string;
   image_size?: string;
+  referenceImages?: ReferenceImage[];
 }): Promise<Buffer> {
   const model = resolveModelForProvider(input.provider, input.model);
   if (input.provider === "gemini") {
-    return generateImageWithGemini(input.prompt, model);
+    return generateImageWithGemini(input.prompt, model, input.referenceImages);
   }
-  return generateImageWithOpenAI(input.prompt, model, input.image_size);
+  return generateImageWithOpenAI(input.prompt, model, input.image_size, input.referenceImages);
 }
 
 const sharedGenerationFields = {
-  prompt: z.string().min(3),
-  output_path: z.string().min(1),
+  prompt: z
+    .string()
+    .min(3)
+    .describe("Text instructions for the generated image or image edit."),
+  output_path: z
+    .string()
+    .min(1)
+    .describe("Local file path where the generated image should be written."),
   /** Defaults to the current Gemini image model; OpenAI path rewrites Gemini-looking models automatically. */
-  model: z.string().default(DEFAULT_GEMINI_IMAGE_MODEL),
+  model: z
+    .string()
+    .default(DEFAULT_GEMINI_IMAGE_MODEL)
+    .describe("Image model name. Defaults to Gemini; OpenAI provider rewrites Gemini-looking defaults automatically."),
   /** Per-call override; otherwise IMAGE_GENERATION_PROVIDER or auto from keys. */
-  provider: z.enum(["gemini", "openai"]).optional(),
+  provider: z
+    .enum(["gemini", "openai"])
+    .optional()
+    .describe("Optional image provider override. If omitted, env configuration decides."),
   /** OpenAI images API size (e.g. 1024x1024). Ignored for Gemini. */
-  image_size: z.string().optional(),
-  mcp_api_key: z.string().optional()
+  image_size: z
+    .string()
+    .optional()
+    .describe("OpenAI image size, for example 1024x1024. Ignored by Gemini."),
+  /** Optional local reference image path for image-to-image generation/editing. */
+  reference_image_path: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Local reference image path. Best for Claude Code/Cursor when the image is in the workspace or user provides an absolute path."),
+  /** Optional local reference image paths for image-to-image generation/editing. */
+  reference_image_paths: z
+    .array(z.string().min(1))
+    .optional()
+    .describe("Multiple local reference image paths."),
+  /** Optional public reference image URL for image-to-image generation/editing. */
+  reference_image_url: z
+    .string()
+    .url()
+    .optional()
+    .describe("Public reference image URL."),
+  /** Optional public reference image URLs for image-to-image generation/editing. */
+  reference_image_urls: z
+    .array(z.string().url())
+    .optional()
+    .describe("Multiple public reference image URLs."),
+  /** Optional base64 image data, useful when an MCP client exposes an uploaded chat image as bytes. */
+  reference_image_base64: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Base64 reference image bytes. Use this only when the MCP client exposes an uploaded chat image as bytes."),
+  /** Optional data URI image, e.g. data:image/png;base64,... */
+  reference_image_data_uri: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("Reference image data URI, for example data:image/png;base64,..."),
+  /** MIME type for reference_image_base64 when it is not a data URI. */
+  reference_image_mime_type: z
+    .string()
+    .optional()
+    .describe("MIME type for reference_image_base64, for example image/png."),
+  /** File name for reference_image_base64 / reference_image_data_uri. */
+  reference_image_name: z
+    .string()
+    .optional()
+    .describe("File name for reference_image_base64 or reference_image_data_uri."),
+  /** Optional MCP-style image object: { type: "image", data, mimeType }. */
+  reference_image: z
+    .object({
+      type: z.string().optional(),
+      data: z.string().min(1).optional(),
+      base64: z.string().min(1).optional(),
+      data_uri: z.string().min(1).optional(),
+      mimeType: z.string().optional(),
+      mime_type: z.string().optional(),
+      name: z.string().optional()
+    })
+    .optional()
+    .describe("MCP-style image object, usually { type: 'image', data: base64, mimeType: 'image/png' }. Useful if Claude/Cursor passes an uploaded chat image into tool arguments."),
+  /** Optional list of MCP-style image objects. */
+  reference_images: z
+    .array(
+      z.object({
+        type: z.string().optional(),
+        data: z.string().min(1).optional(),
+        base64: z.string().min(1).optional(),
+        data_uri: z.string().min(1).optional(),
+        mimeType: z.string().optional(),
+        mime_type: z.string().optional(),
+        name: z.string().optional()
+      })
+    )
+    .optional()
+    .describe("Multiple MCP-style image objects."),
+  mcp_api_key: z.string().optional().describe("Optional MCP-level auth key when MCP_STATIC_API_KEY is configured.")
 };
 
 async function uploadImageToEndpoint(input: {
@@ -254,7 +553,7 @@ async function uploadImageToEndpoint(input: {
       : "image/png";
 
   const form = new FormData();
-  form.append("image", new Blob([data], { type: mimeType }), fileName);
+  form.append("image", new Blob([bufferToBlobPart(data)], { type: mimeType }), fileName);
 
   const resolvedBearerToken =
     input.bearerToken ??
@@ -309,16 +608,18 @@ export function createServer(): McpServer {
 
   server.tool(
     "generate_image",
-    "Generate an image via Gemini or OpenAI (see env keys / IMAGE_GENERATION_PROVIDER) and save to disk.",
+    "Generate an image via Gemini or OpenAI and save it to disk. Supports reference images from local paths, public URLs, base64/data URIs, or MCP-style image objects when a client such as Claude or Cursor exposes uploaded chat images to tool arguments.",
     sharedGenerationFields,
     async (input) => {
       assertMcpApiKey(input.mcp_api_key);
       const provider = resolveImageProvider(input.provider);
+      const referenceImages = await loadReferenceImages(input);
       const image = await generateImageBytes({
         prompt: input.prompt,
         provider,
         model: input.model,
-        image_size: input.image_size
+        image_size: input.image_size,
+        referenceImages
       });
       const outDir = path.dirname(input.output_path);
       await fs.promises.mkdir(outDir, { recursive: true });
@@ -329,6 +630,11 @@ export function createServer(): McpServer {
         output_path: input.output_path,
         bytes: image.byteLength,
         model: resolveModelForProvider(provider, input.model),
+        reference_images: referenceImages.map((image) => ({
+          name: image.name,
+          mime_type: image.mimeType,
+          bytes: image.data.byteLength
+        })),
         ...(provider === "openai" && input.image_size
           ? { image_size: input.image_size }
           : provider === "openai"
@@ -343,7 +649,7 @@ export function createServer(): McpServer {
 
   server.tool(
     "upload_image",
-    "Upload a local image file to upload-public endpoint (x-api-key supported).",
+    "Upload a local image file to an upload-public endpoint (x-api-key supported).",
     {
       image_path: z.string().min(1),
       endpoint: z.string().url().optional(),
@@ -375,7 +681,7 @@ export function createServer(): McpServer {
 
   server.tool(
     "generate_and_upload",
-    "Generate an image (Gemini or OpenAI), save it, then upload to upload-public endpoint.",
+    "Generate an image via Gemini or OpenAI, save it, then upload it. Supports reference images from local paths, public URLs, base64/data URIs, or MCP-style image objects when a client such as Claude or Cursor exposes uploaded chat images to tool arguments.",
     {
       ...sharedGenerationFields,
       endpoint: z.string().url().optional(),
@@ -387,11 +693,13 @@ export function createServer(): McpServer {
     async (input) => {
       assertMcpApiKey(input.mcp_api_key);
       const provider = resolveImageProvider(input.provider);
+      const referenceImages = await loadReferenceImages(input);
       const image = await generateImageBytes({
         prompt: input.prompt,
         provider,
         model: input.model,
-        image_size: input.image_size
+        image_size: input.image_size,
+        referenceImages
       });
       await fs.promises.mkdir(path.dirname(input.output_path), { recursive: true });
       await fs.promises.writeFile(input.output_path, image);
@@ -403,7 +711,12 @@ export function createServer(): McpServer {
           generated: {
             output_path: input.output_path,
             bytes: image.byteLength,
-            model: resolveModelForProvider(provider, input.model)
+            model: resolveModelForProvider(provider, input.model),
+            reference_images: referenceImages.map((image) => ({
+              name: image.name,
+              mime_type: image.mimeType,
+              bytes: image.data.byteLength
+            }))
           },
           upload: {
             skipped: true,
@@ -426,7 +739,12 @@ export function createServer(): McpServer {
         generated: {
           output_path: input.output_path,
           bytes: image.byteLength,
-          model: resolveModelForProvider(provider, input.model)
+          model: resolveModelForProvider(provider, input.model),
+          reference_images: referenceImages.map((image) => ({
+            name: image.name,
+            mime_type: image.mimeType,
+            bytes: image.data.byteLength
+          }))
         },
         upload: {
           used_auth: upload.usedAuth,

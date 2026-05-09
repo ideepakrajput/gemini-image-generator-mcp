@@ -1,6 +1,6 @@
 {
   "name": "@ideepakrajput/gemini-image-generator-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server for image generation via Gemini and/or OpenAI, with optional upload",
   "type": "module",
   "main": "dist/index.js",

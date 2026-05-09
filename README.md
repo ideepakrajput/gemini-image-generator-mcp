@@ -8,6 +8,8 @@ It provides 3 tools:
 - `upload_image`: upload a local image to your API endpoint
 - `generate_and_upload`: generate and upload in one call
 
+`generate_image` and `generate_and_upload` also support optional reference images for image-to-image generation or editing. Pass local image paths with `reference_image_path` / `reference_image_paths`, public image URLs with `reference_image_url` / `reference_image_urls`, or uploaded chat image bytes as base64/data URI fields when your MCP client exposes them.
+
 ## Requirements
 
 - Node.js `>= 20`
@@ -109,6 +111,55 @@ Use `npx`:
 
 Add this MCP server entry under `mcpServers` (same `env` shapes as above).
 
+Example:
+
+```json
+{
+    "mcpServers": {
+        "gemini_image_generator": {
+            "command": "npx",
+            "args": ["-y", "@ideepakrajput/gemini-image-generator-mcp"],
+            "env": {
+                "GEMINI_API_KEY": "your_google_ai_studio_key",
+                "OPENAI_API_KEY": "sk-...",
+                "IMAGE_GENERATION_PROVIDER": "auto"
+            }
+        }
+    }
+}
+```
+
+### Cursor MCP config
+
+Use the same command/args in Cursor's MCP settings:
+
+```json
+{
+    "mcpServers": {
+        "gemini_image_generator": {
+            "command": "npx",
+            "args": ["-y", "@ideepakrajput/gemini-image-generator-mcp"],
+            "env": {
+                "GEMINI_API_KEY": "your_google_ai_studio_key",
+                "OPENAI_API_KEY": "sk-...",
+                "IMAGE_GENERATION_PROVIDER": "auto"
+            }
+        }
+    }
+}
+```
+
+### Claude/Cursor reference image behavior
+
+For best reliability in Claude Desktop, Claude Code, and Cursor, pass reference images as one of:
+
+- `reference_image_path` when the image is on local disk
+- `reference_image_url` when the image is publicly reachable
+- `reference_image_base64` / `reference_image_data_uri` when the client exposes uploaded image bytes
+- `reference_image` / `reference_images` for MCP-style image objects like `{ "type": "image", "data": "...base64...", "mimeType": "image/png" }`
+
+Chat attachments are controlled by the MCP host. If Claude or Cursor does not expose the uploaded chat image to tool arguments, the MCP server cannot read it directly; provide a local path or public URL instead.
+
 ## Tool Input Examples
 
 ### `generate_image`
@@ -137,6 +188,61 @@ OpenAI:
 }
 ```
 
+With a reference image:
+
+```json
+{
+    "prompt": "Use the reference image composition, but make it a polished luxury skincare ad",
+    "output_path": "/tmp/skincare-ad.png",
+    "provider": "openai",
+    "model": "gpt-image-2",
+    "image_size": "1024x1024",
+    "reference_image_path": "/tmp/reference.png",
+    "mcp_api_key": "your_mcp_static_key"
+}
+```
+
+Multiple references and URL references are supported:
+
+```json
+{
+    "prompt": "Combine the product from the first image with the background style from the second image",
+    "output_path": "/tmp/composite.png",
+    "reference_image_paths": ["/tmp/product.png", "/tmp/background.png"],
+    "reference_image_url": "https://example.com/style-reference.jpg",
+    "mcp_api_key": "your_mcp_static_key"
+}
+```
+
+If your MCP client can pass an uploaded chat image as bytes, use base64 or an MCP-style image object:
+
+```json
+{
+    "prompt": "Use this uploaded product image and place it in a premium studio scene",
+    "output_path": "/tmp/product-scene.png",
+    "reference_image_base64": "iVBORw0KGgoAAAANSUhEUg...",
+    "reference_image_mime_type": "image/png",
+    "reference_image_name": "uploaded-product.png",
+    "mcp_api_key": "your_mcp_static_key"
+}
+```
+
+```json
+{
+    "prompt": "Keep the same person and outfit, change the background to a clean office",
+    "output_path": "/tmp/edited-upload.png",
+    "reference_image": {
+        "type": "image",
+        "data": "iVBORw0KGgoAAAANSUhEUg...",
+        "mimeType": "image/png",
+        "name": "chat-upload.png"
+    },
+    "mcp_api_key": "your_mcp_static_key"
+}
+```
+
+Important: MCP servers do not automatically receive raw files attached in a chat. The host/client must pass the upload to this tool as a local path, public URL, base64 string, data URI, or MCP-style image object.
+
 ### `upload_image`
 
 ```json
@@ -154,6 +260,7 @@ OpenAI:
 {
     "prompt": "A blue abstract marketing background",
     "output_path": "/tmp/banner.png",
+    "reference_image_path": "/tmp/reference.png",
     "endpoint": "https://your-domain.com/api/upload-public",
     "x_api_key": "your_upload_static_api_key",
     "mcp_api_key": "your_mcp_static_key"
